@@ -1,198 +1,94 @@
-# Configure and downloading plugins for aws
-provider "aws" {
-  region     = "${var.aws_region}"
+# Create an ECS cluster
+resource "aws_ecs_cluster" "ecs_cluster" {
+  name = "my-ecs-cluster"
 }
 
-# Creating VPC
-resource "aws_vpc" "demovpc" {
-  cidr_block       = "${var.vpc_cidr}"
-  instance_tenancy = "default"
+resource "aws_ecs_capacity_provider" "ecs_capacity_provider" {
+  name = "test1"
 
-  tags = {
-    Name = "Demo VPC - created with terraform"
-  }
-}
+  auto_scaling_group_provider {
+    auto_scaling_group_arn = aws_autoscaling_group.ecs_asg.arn
 
-# Creating Internet Gateway 
-resource "aws_internet_gateway" "demogateway" {
-  vpc_id = "${aws_vpc.demovpc.id}"
-}
-
-# Grant the internet access to VPC by updating its main route table
-resource "aws_route" "internet_access" {
-  route_table_id         = "${aws_vpc.demovpc.main_route_table_id}"
-  destination_cidr_block = "0.0.0.0/0"
-  gateway_id             = "${aws_internet_gateway.demogateway.id}"
-}
-
-# Creating 1st subnet 
-resource "aws_subnet" "demosubnet" {
-  vpc_id                  = "${aws_vpc.demovpc.id}"
-  cidr_block             = "${var.subnet_cidr}"
-  map_public_ip_on_launch = true
-  availability_zone = "${var.aws_region}"
-
-  tags = {
-    Name = "Demo subnet"
+    managed_scaling {
+      maximum_scaling_step_size = 1000
+      minimum_scaling_step_size = 1
+      status                    = "ENABLED"
+      target_capacity           = 3
+    }
   }
 }
 
-# Creating 2nd subnet 
-resource "aws_subnet" "demosubnet1" {
-  vpc_id                  = "${aws_vpc.demovpc.id}"
-  cidr_block             = "${var.subnet1_cidr}"
-  map_public_ip_on_launch = true
-  availability_zone = "us-east-1b"
+resource "aws_ecs_cluster_capacity_providers" "example" {
+  cluster_name = aws_ecs_cluster.ecs_cluster.name
 
-  tags = {
-    Name = "Demo subnet 1"
+  capacity_providers = [aws_ecs_capacity_provider.ecs_capacity_provider.name]
+
+  default_capacity_provider_strategy {
+    base              = 1
+    weight            = 100
+    capacity_provider = aws_ecs_capacity_provider.ecs_capacity_provider.name
   }
 }
 
-# Creating Security Group
-resource "aws_security_group" "demosg" {
-  name        = "Demo Security Group"
-  description = "Demo Module"
-  vpc_id      = "${aws_vpc.demovpc.id}"
-
-  # Inbound Rules
-  # HTTP access from anywhere
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+# Define the ECS task definition for the service
+resource "aws_ecs_task_definition" "ecs_task_definition" {
+  family             = "my-ecs-task"
+  network_mode       = "awsvpc"
+  execution_role_arn = "arn:aws:iam::532199187081:role/ecsTaskExecutionRole"
+  cpu                = 256
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "X86_64"
   }
-
-  # HTTPS access from anywhere
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # SSH access from anywhere
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # Splunk default port
-  ingress {
-    from_port   = 8000
-    to_port     = 8000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # Replication Port
-  ingress {
-    from_port   = 8089
-    to_port     = 8089
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # Management Port
-  ingress {
-    from_port   = 4598
-    to_port     = 4598
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # Ingestion Port
-  ingress {
-    from_port   = 9997
-    to_port     = 9997
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # Outbound Rules
-  # Internet access to anywhere
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  container_definitions = jsonencode([
+    {
+      name      = "dockergs"
+      image     = "public.ecr.aws/f9n5f1l7/dgs:latest"
+      cpu       = 256
+      memory    = 512
+      essential = true
+      portMappings = [
+        {
+          containerPort = 80
+          hostPort      = 80
+          protocol      = "tcp"
+        }
+      ]
+    }
+  ])
 }
 
-# Creating key pair
-resource "aws_key_pair" "demokey" {
-  key_name   = "${var.key_name}"
-  public_key = "${file(var.public_key)}"
-}
+# Define the ECS service that will run the task
+resource "aws_ecs_service" "ecs_service" {
+  name            = "my-ecs-service"
+  cluster         = aws_ecs_cluster.ecs_cluster.id
+  task_definition = aws_ecs_task_definition.ecs_task_definition.arn
+  desired_count   = 2
 
-# Creating EC2 Instance
-resource "aws_instance" "demoinstance" {
-
-  # AMI based on region 
-  ami = "${lookup(var.ami, var.aws_region)}"
-
-  # Launching instance into subnet 
-  # subnet_id = "${aws_subnet.demosubnet.id}"
-
-  # Instance type 
-  instance_type = "${var.instancetype}"
-
-  # Count of instance
-  count= "${var.master_count}"
-
-  # SSH key that we have generated above for connection
-  key_name = "${aws_key_pair.demokey.id}"
-
-  # Attaching security group to our instance
-  vpc_security_group_ids = ["${aws_security_group.demosg.id}"]
-
-  # Attaching Tag to Instance 
-  tags = {
-    Name = "Search-Head-${count.index + 1}"
+  network_configuration {
+    subnets         = [aws_subnet.subnet.id, aws_subnet.subnet2.id]
+    security_groups = [aws_security_group.security_group.id]
   }
 
-  # Root Block Storage
-#   root_block_device {
-#     volume_size = "40"
-#     volume_type = "standard"
-#   }
-
-  #EBS Block Storage
-#   ebs_block_device {
-#     device_name = "/dev/sdb"
-#     volume_size = "80"
-#     volume_type = "standard"
-#     delete_on_termination = false
-#   }
-
-  # SSH into instance 
-  connection {
-
-    # Host name
-    host = self.public_ip
-    # The default username for our AMI
-    user = "ec2-user"
-    # Private key for connection
-    private_key = "${file(var.private_key)}"
-    # Type of connection
-    type = "ssh"
+  force_new_deployment = true
+  placement_constraints {
+    type = "distinctInstance"
   }
 
-  # Installing splunk on newly created instance
-  provisioner "remote-exec" {
-    inline = [
-      "sudo yum update -y",
-      "sudo amazon-linux-extras install docker -y",
-      "sudo service docker start",
-      "sudo usermod -a -G docker ec2-user",
-      "sudo chkconfig docker on",
-    #   "sudo yum install -y git",
-    #   "sudo chmod 666 /var/run/docker.sock",
-    #   "docker pull dhruvin30/dhsoniweb:v1",
-    #   "docker run -d -p 80:80 dhruvin30/dhsoniweb:latest"   
-  ]
- }
+  triggers = {
+    redeployment = timestamp()
+  }
+
+  capacity_provider_strategy {
+    capacity_provider = aws_ecs_capacity_provider.ecs_capacity_provider.name
+    weight            = 100
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.ecs_tg.arn
+    container_name   = "dockergs"
+    container_port   = 80
+  }
+
+  depends_on = [aws_autoscaling_group.ecs_asg]
 }
